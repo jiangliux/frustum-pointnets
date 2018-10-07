@@ -1,0 +1,14 @@
+.idea/
+dataset/KITTI
+*/__pycache__/
+*/*result*/
+*/*log*/
+*.so
+*.pickle
+*.cu.o
+models/tf_ops/grouping/query_ball_point
+models/tf_ops/grouping/query_ball_point_block
+models/tf_ops/grouping/query_ball_point_cuda
+models/tf_ops/grouping/query_ball_point_grid
+models/tf_ops/grouping/selection_sort
+models/tf_ops/grouping/selection_sort_cuda
