@@ -193,9 +193,7 @@ def train():
                'step': batch,
                'end_points': end_points}
 
-        num_batches = len(TRAIN_DATASET) // BATCH_SIZE
-        current_epoch = int(sess.run(batch) // num_batches)
-        for epoch in range(current_epoch, MAX_EPOCH):
+        for epoch in range(MAX_EPOCH):
             log_string('**** EPOCH %03d ****' % (epoch))
             sys.stdout.flush()
              

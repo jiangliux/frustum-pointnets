@@ -99,7 +99,7 @@ class FrustumDataset(object):
     '''
     def __init__(self, npoints, split,
                  random_flip=False, random_shift=False, rotate_to_center=False,
-                 overwritten_data_path=None, from_rgb_detection=False, one_hot=False):
+                 overwritten_data_path=None, from_rgb_detection=False, one_hot=False, is_hypotheses=False):
         '''
         Input:
             npoints: int scalar, number of points for frustum point cloud.
@@ -120,6 +120,7 @@ class FrustumDataset(object):
         self.random_shift = random_shift
         self.rotate_to_center = rotate_to_center
         self.one_hot = one_hot
+        self.is_hypotheses = is_hypotheses
         if overwritten_data_path is None:
             overwritten_data_path = os.path.join(ROOT_DIR,
                 'kitti/frustum_carpedcyc_%s.pickle'%(split))
@@ -134,6 +135,8 @@ class FrustumDataset(object):
                 # frustum_angle is clockwise angle from positive x-axis
                 self.frustum_angle_list = pickle.load(fp) 
                 self.prob_list = pickle.load(fp)
+                if is_hypotheses:
+                    self.hypotheses_list = pickle.load(fp)
         else:
             with open(overwritten_data_path,'rb') as fp:
                 self.id_list = pickle.load(fp)
@@ -172,11 +175,13 @@ class FrustumDataset(object):
         point_set = point_set[choice, :]
 
         if self.from_rgb_detection:
+            return_list = [point_set, rot_angle, self.prob_list[index]]
             if self.one_hot:
-                return point_set, rot_angle, self.prob_list[index], one_hot_vec
-            else:
-                return point_set, rot_angle, self.prob_list[index]
-        
+                return_list.append(one_hot_vec)
+            if self.is_hypotheses:
+                return_list.append(self.hypotheses_list[index])
+            return return_list
+
         # ------------------------------ LABELS ----------------------------
         seg = self.label_list[index] 
         seg = seg[choice]
@@ -214,12 +219,14 @@ class FrustumDataset(object):
         angle_class, angle_residual = angle2class(heading_angle,
             NUM_HEADING_BIN)
 
+        return_list = [point_set, seg, box3d_center, angle_class, angle_residual,
+                       size_class, size_residual, rot_angle]
+
         if self.one_hot:
-            return point_set, seg, box3d_center, angle_class, angle_residual,\
-                size_class, size_residual, rot_angle, one_hot_vec
-        else:
-            return point_set, seg, box3d_center, angle_class, angle_residual,\
-                size_class, size_residual, rot_angle
+            return_list.append(one_hot_vec)
+        if self.is_hypotheses:
+            return_list.append(self.hypotheses_list[index])
+        return return_list
 
     def get_center_view_rot_angle(self, index):
         ''' Get the frustum rotation angle, it isshifted by pi/2 so that it

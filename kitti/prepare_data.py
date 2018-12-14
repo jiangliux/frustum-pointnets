@@ -315,7 +315,40 @@ def read_det_file(det_filename):
         box2d_list.append(np.array([float(t[i]) for i in range(3,7)]))
     return id_list, type_list, box2d_list, prob_list
 
- 
+def read_MOT_det_file(det_filename, image_dir, is_hypotheses=False):
+    ''' Parse lines in 2D detection output files of MOT format'''
+    image_filenames = {
+        int(os.path.splitext(f)[0]): os.path.join(image_dir, f)
+        for f in os.listdir(image_dir)}
+
+    id_list = []
+    type_list = []
+    prob_list = []
+    box2d_list = []
+    hypotheses_list = []
+    detections_in = np.loadtxt(det_filename, delimiter=',')
+
+    for detection_idx, detection in enumerate(detections_in):
+        # print("detection %05d/%05d" % (detection_idx, detections_in.shape[0]))
+
+        frame_idx = int(detection[0])
+        if frame_idx not in image_filenames:
+            print("WARNING could not find image for frame %d" % frame_idx)
+            continue
+
+        if is_hypotheses:
+            hypotheses_list.append(int(detection[1]))
+
+        id_list.append(frame_idx)
+        type_list.append('Pedestrian')
+        prob_list.append(detection[6])
+        box2d_list.append(np.array([detection[2], detection[3],
+                                    detection[2] + detection[4], detection[3] + detection[5]])) #convert to xyxy format
+
+
+    return id_list, type_list, box2d_list, prob_list, hypotheses_list
+
+
 def extract_frustum_data_rgb_detection(det_filename, split, output_filename,
                                        viz=False,
                                        type_whitelist=['Car'],
@@ -421,6 +454,123 @@ def extract_frustum_data_rgb_detection(det_filename, split, output_filename,
                 colormap='gnuplot', scale_factor=1, figure=fig)
             raw_input()
 
+
+def extract_frustum_data_video_detection(det_filename,
+                                         img_dir,
+                                         lidar_dir,
+                                         calib_dir,
+                                         output_filename,
+                                         viz=False,
+                                         type_whitelist=['Car'],
+                                         is_hypotheses=False,
+                                         img_height_threshold=25,
+                                         lidar_point_threshold=5):
+    ''' Extract point clouds in frustums extruded from 2D detection boxes.
+        Update: Lidar points and 3d boxes are in *rect camera* coord system
+            (as that in 3d box label files)
+
+    Input:
+        det_filename: string, each line is
+            img_path typeid confidence xmin ymin xmax ymax
+        split: string, either trianing or testing
+        output_filename: string, the name for output .pickle file
+        type_whitelist: a list of strings, object types we are interested in.
+        img_height_threshold: int, neglect image with height lower than that.
+        lidar_point_threshold: int, neglect frustum with too few points.
+    Output:
+        None (will write a .pickle file to the disk)
+    '''
+    dataset = kitti_object_video(img_dir, lidar_dir, calib_dir)
+    det_id_list, det_type_list, det_box2d_list, det_prob_list, det_hypotheses_list = \
+        read_MOT_det_file(det_filename, img_dir, is_hypotheses)
+        # read_det_file(det_filename)
+    cache_id = -1
+    cache = None
+
+    id_list = []
+    type_list = []
+    box2d_list = []
+    prob_list = []
+    input_list = []  # channel number = 4, xyz,intensity in rect camera coord
+    frustum_angle_list = []  # angle of 2d box center from pos x-axis
+    hypotheses_list = []
+
+    for det_idx in range(len(det_id_list)):
+        data_idx = det_id_list[det_idx]
+        # print('det idx: %d/%d, data idx: %d' % \
+        #       (det_idx, len(det_id_list), data_idx))
+        if cache_id != data_idx:
+            calib = dataset.get_calibration(data_idx)  # 3 by 4 matrix
+            pc_velo = dataset.get_lidar(data_idx)
+            pc_rect = np.zeros_like(pc_velo)
+            pc_rect[:, 0:3] = calib.project_velo_to_rect(pc_velo[:, 0:3])
+            pc_rect[:, 3] = pc_velo[:, 3]
+            img = dataset.get_image(data_idx)
+            img_height, img_width, img_channel = img.shape
+            _, pc_image_coord, img_fov_inds = get_lidar_in_image_fov( \
+                pc_velo[:, 0:3], calib, 0, 0, img_width, img_height, True)
+            cache = [calib, pc_rect, pc_image_coord, img_fov_inds]
+            cache_id = data_idx
+        else:
+            calib, pc_rect, pc_image_coord, img_fov_inds = cache
+
+        if det_type_list[det_idx] not in type_whitelist: continue
+
+        # 2D BOX: Get pts rect backprojected
+        xmin, ymin, xmax, ymax = det_box2d_list[det_idx]
+        box_fov_inds = (pc_image_coord[:, 0] < xmax) & \
+                       (pc_image_coord[:, 0] >= xmin) & \
+                       (pc_image_coord[:, 1] < ymax) & \
+                       (pc_image_coord[:, 1] >= ymin)
+        box_fov_inds = box_fov_inds & img_fov_inds
+        pc_in_box_fov = pc_rect[box_fov_inds, :]
+        # Get frustum angle (according to center pixel in 2D BOX)
+        box2d_center = np.array([(xmin + xmax) / 2.0, (ymin + ymax) / 2.0])
+        uvdepth = np.zeros((1, 3))
+        uvdepth[0, 0:2] = box2d_center
+        uvdepth[0, 2] = 20  # some random depth
+        box2d_center_rect = calib.project_image_to_rect(uvdepth)
+        frustum_angle = -1 * np.arctan2(box2d_center_rect[0, 2],
+                                        box2d_center_rect[0, 0])
+
+        # Pass objects that are too small
+        if ymax - ymin < img_height_threshold or \
+                        len(pc_in_box_fov) < lidar_point_threshold:
+            continue
+
+        id_list.append(data_idx)
+        type_list.append(det_type_list[det_idx])
+        box2d_list.append(det_box2d_list[det_idx])
+        prob_list.append(det_prob_list[det_idx])
+        input_list.append(pc_in_box_fov)
+        frustum_angle_list.append(frustum_angle)
+        if is_hypotheses:
+            hypotheses_list.append(det_hypotheses_list[det_idx])
+
+    with open(output_filename, 'wb') as fp:
+        pickle.dump(id_list, fp)
+        pickle.dump(box2d_list, fp)
+        pickle.dump(input_list, fp)
+        pickle.dump(type_list, fp)
+        pickle.dump(frustum_angle_list, fp)
+        pickle.dump(prob_list, fp)
+        if is_hypotheses:
+            pickle.dump(hypotheses_list, fp)
+
+    if viz:
+        import mayavi.mlab as mlab
+        for i in range(10):
+            p1 = input_list[i]
+            fig = mlab.figure(figure=None, bgcolor=(0.4, 0.4, 0.4),
+                              fgcolor=None, engine=None, size=(500, 500))
+            mlab.points3d(p1[:, 0], p1[:, 1], p1[:, 2], p1[:, 1], mode='point',
+                          colormap='gnuplot', scale_factor=1, figure=fig)
+            fig = mlab.figure(figure=None, bgcolor=(0.4, 0.4, 0.4),
+                              fgcolor=None, engine=None, size=(500, 500))
+            mlab.points3d(p1[:, 2], -p1[:, 0], -p1[:, 1], seg, mode='point',
+                          colormap='gnuplot', scale_factor=1, figure=fig)
+            raw_input()
+
 def write_2d_rgb_detection(det_filename, split, result_dir):
     ''' Write 2D detection results for KITTI evaluation.
         Convert from Wei's format to KITTI format. 
@@ -461,46 +611,102 @@ def write_2d_rgb_detection(det_filename, split, result_dir):
             fout.write(line+'\n')
         fout.close() 
 
+def extract_image_sets(img_dir, output_file_name, ext='.png'):
+    with open(output_file_name, 'w') as f:
+        for img_name in os.listdir(img_dir):
+            f.write(os.path.basename(img_name).rstrip(ext) + '\n')
+
+
+def generate_frustum_data(kitti_dir='../dataset/KITTI/2011_09_28', is_hypotheses=False):
+
+    for sequence in os.listdir(kitti_dir):
+        # sequence = '2011_09_28_drive_0039_sync'
+        print("Processing %s" % sequence)
+        sequence_dir = os.path.join(kitti_dir, sequence)
+        if not os.path.isdir(sequence_dir):
+            continue
+
+        image_dir = os.path.join(sequence_dir, "image_03/data")
+        lidar_dir = os.path.join(sequence_dir, "velodyne_points/data")
+        detection_dir = os.path.join(sequence_dir, 'det')
+        calib_dir = kitti_dir
+        if is_hypotheses:
+            det_filename = os.path.join(detection_dir, "hypotheses.txt")
+            output_filename = os.path.join(detection_dir, sequence + '_video_rgb_hypotheses.pickle')
+        else:
+            det_filename = os.path.join(detection_dir, "det.txt")
+            output_filename = os.path.join(detection_dir, sequence + '_video_rgb_detection.pickle')
+
+        extract_frustum_data_video_detection(
+            det_filename,
+            image_dir,
+            lidar_dir,
+            calib_dir,
+            output_filename,
+            type_whitelist=['Pedestrian'],
+            is_hypotheses=is_hypotheses,
+        )
+
+
 if __name__=='__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--demo', action='store_true', help='Run demo.')
-    parser.add_argument('--gen_train', action='store_true', help='Generate train split frustum data with perturbed GT 2D boxes')
-    parser.add_argument('--gen_val', action='store_true', help='Generate val split frustum data with GT 2D boxes')
-    parser.add_argument('--gen_val_rgb_detection', action='store_true', help='Generate val split frustum data with RGB detection 2D boxes')
-    parser.add_argument('--car_only', action='store_true', help='Only generate cars; otherwise cars, peds and cycs')
-    args = parser.parse_args()
-
-    if args.demo:
-        demo()
-        exit()
-
-    if args.car_only:
-        type_whitelist = ['Car']
-        output_prefix = 'frustum_caronly_'
-    else:
-        type_whitelist = ['Car', 'Pedestrian', 'Cyclist']
-        output_prefix = 'frustum_carpedcyc_'
-
-    if args.gen_train:
-        extract_frustum_data(\
-            os.path.join(BASE_DIR, 'image_sets/train.txt'),
-            'training',
-            os.path.join(BASE_DIR, output_prefix+'train.pickle'), 
-            viz=False, perturb_box2d=True, augmentX=5,
-            type_whitelist=type_whitelist)
-
-    if args.gen_val:
-        extract_frustum_data(\
-            os.path.join(BASE_DIR, 'image_sets/val.txt'),
-            'training',
-            os.path.join(BASE_DIR, output_prefix+'val.pickle'),
-            viz=False, perturb_box2d=False, augmentX=1,
-            type_whitelist=type_whitelist)
-
-    if args.gen_val_rgb_detection:
-        extract_frustum_data_rgb_detection(\
-            os.path.join(BASE_DIR, 'rgb_detections/rgb_detection_val.txt'),
-            'training',
-            os.path.join(BASE_DIR, output_prefix+'val_rgb_detection.pickle'),
-            viz=False,
-            type_whitelist=type_whitelist) 
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--demo', action='store_true', help='Run demo.')
+    # parser.add_argument('--gen_train', action='store_true', help='Generate train split frustum data with perturbed GT 2D boxes')
+    # parser.add_argument('--gen_val', action='store_true', help='Generate val split frustum data with GT 2D boxes')
+    # parser.add_argument('--gen_val_rgb_detection', action='store_true', help='Generate val split frustum data with RGB detection 2D boxes')
+    # parser.add_argument('--gen_video_rgb_detection', action='store_true',
+    #                     help='Generate frustum data with RGB detection 2D boxes on kitti video sequence')
+    # parser.add_argument('--car_only', action='store_true', help='Only generate cars; otherwise cars, peds and cycs')
+    # args = parser.parse_args()
+    #
+    # if args.demo:
+    #     demo()
+    #     exit()
+    #
+    # if args.car_only:
+    #     type_whitelist = ['Car']
+    #     output_prefix = 'frustum_caronly_'
+    # else:
+    #     type_whitelist = ['Car', 'Pedestrian', 'Cyclist']
+    #     output_prefix = 'frustum_carpedcyc_'
+    #
+    # if args.gen_train:
+    #     extract_frustum_data(\
+    #         os.path.join(BASE_DIR, 'image_sets/train.txt'),
+    #         'training',
+    #         os.path.join(BASE_DIR, output_prefix+'train.pickle'),
+    #         viz=False, perturb_box2d=True, augmentX=5,
+    #         type_whitelist=type_whitelist)
+    #
+    # if args.gen_val:
+    #     extract_frustum_data(\
+    #         os.path.join(BASE_DIR, 'image_sets/val.txt'),
+    #         'training',
+    #         os.path.join(BASE_DIR, output_prefix+'val.pickle'),
+    #         viz=False, perturb_box2d=False, augmentX=1,
+    #         type_whitelist=type_whitelist)
+    #
+    # if args.gen_val_rgb_detection:
+    #     extract_frustum_data_rgb_detection(\
+    #         os.path.join(BASE_DIR, 'rgb_detections/rgb_detection_val.txt'),
+    #         'training',
+    #         os.path.join(BASE_DIR, output_prefix+'val_rgb_detection.pickle'),
+    #         viz=False,
+    #         type_whitelist=type_whitelist)
+    #
+    #
+    # if args.gen_video_rgb_detection:
+    #     video_path = os.path.join(ROOT_DIR, 'dataset/KITTI/2011_09_26/')
+    #     extract_image_sets(os.path.join(video_path, '2011_09_26_drive_0001_sync/image_03/data'),
+    #                        output_file_name='kitti/image_sets/video.txt',
+    #                        ext='.png')
+    #
+    #     extract_frustum_data_video_detection(
+    #         os.path.join(BASE_DIR, 'rgb_detections/rgb_detection_video.txt'),
+    #         os.path.join(video_path, '2011_09_26_drive_0001_sync/image_03/data'),
+    #         os.path.join(video_path, '2011_09_26_drive_0001_sync/velodyne_points/data'),
+    #         video_path,
+    #         os.path.join(BASE_DIR, output_prefix+'video_rgb_detection.pickle'),
+    #         viz=False,
+    #         type_whitelist=type_whitelist)
+    generate_frustum_data()

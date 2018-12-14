@@ -62,14 +62,14 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
                          scope='conv5', bn_decay=bn_decay)
     global_feat = tf_util.max_pool2d(net, [num_point,1],
                                      padding='VALID', scope='maxpool')
-    print global_feat
+    # print global_feat
 
     global_feat = tf.concat([global_feat, tf.expand_dims(tf.expand_dims(one_hot_vec, 1), 1)], axis=3)
-    print 'Global Feat: ', global_feat
+    print ('Global Feat: ', global_feat)
     global_feat_expand = tf.tile(global_feat, [1, num_point, 1, 1])
     print point_feat, global_feat_expand
     concat_feat = tf.concat(axis=3, values=[point_feat, global_feat_expand])
-    print concat_feat
+    # print concat_feat
 
     net = tf_util.conv2d(concat_feat, 512, [1,1],
                          padding='VALID', stride=[1,1],
@@ -93,9 +93,9 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
                          padding='VALID', stride=[1,1], activation_fn=None,
                          scope='conv10')
     logits = tf.squeeze(logits, [2]) # BxNxC
-    print logits
+    # print logits
     
-    print '-----------'
+    # print ('-----------')
     #net = tf.concat(axis=3, values=[net, tf.expand_dims(tf.slice(point_cloud, [0,0,0], [-1,-1,3]), 2)])
     mask = tf.slice(logits,[0,0,0],[-1,-1,1]) < tf.slice(logits,[0,0,1],[-1,-1,1])
     mask = tf.to_float(mask) # BxNx1
@@ -107,7 +107,7 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
     mask_xyz_mean = tf.reduce_sum(tf.tile(mask, [1,1,3])*point_cloud_xyz, axis=1, keep_dims=True) # Bx1x3
     mask_xyz_mean = mask_xyz_mean/tf.maximum(mask_count,1) # Bx1x3
     point_cloud_xyz_stage1 = point_cloud_xyz - tf.tile(mask_xyz_mean, [1,num_point,1])
-    print 'Point cloud xyz stage1: ', point_cloud_xyz_stage1
+    # print 'Point cloud xyz stage1: ', point_cloud_xyz_stage1
 
     # ---- Regress 1st stage center ----
     net = tf.expand_dims(point_cloud_xyz_stage1, 2)
@@ -126,10 +126,10 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
                          scope='conv-reg3-stage1', bn_decay=bn_decay)
     mask_expand = tf.tile(tf.expand_dims(mask,-1), [1,1,1,256])
     masked_net = net*mask_expand
-    print masked_net
+    # print masked_net
     net = tf_util.max_pool2d(masked_net, [num_point,1], padding='VALID', scope='maxpool-stage1')
     net = tf.squeeze(net, axis=[1,2])
-    print net
+    # print net
     net = tf.concat([net, one_hot_vec], axis=1)
     net = tf_util.fully_connected(net, 256, scope='fc1-stage1', bn=True, is_training=is_training, bn_decay=bn_decay)
     net = tf_util.fully_connected(net, 128, scope='fc2-stage1', bn=True, is_training=is_training, bn_decay=bn_decay)
@@ -139,7 +139,7 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
 
     # ---- Subtract stage1 center ----
     point_cloud_xyz_submean = point_cloud_xyz - tf.expand_dims(stage1_center, 1)
-    print 'Point cloud xyz submean: ', point_cloud_xyz_submean
+    # print 'Point cloud xyz submean: ', point_cloud_xyz_submean
 
     net = tf.expand_dims(point_cloud_xyz_submean, 2)
     print net
@@ -172,7 +172,7 @@ def get_model(point_cloud, one_hot_vec, is_training, bn_decay=None):
     # First 3 are cx,cy,cz, next NUM_HEADING_BIN*2 are for heading
     # next NUM_SIZE_CLUSTER*4 are for dimension
     output = tf_util.fully_connected(net, 3+NUM_HEADING_BIN*2+NUM_SIZE_CLUSTER*4, activation_fn=None, scope='fc3')
-    print output
+    # print output
 
     center = tf.slice(output, [0,0], [-1,3])
     center = center + stage1_center # Bx3

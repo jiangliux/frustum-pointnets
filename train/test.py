@@ -26,8 +26,8 @@ from train_util import get_batch
 parser = argparse.ArgumentParser()
 parser.add_argument('--gpu', type=int, default=0, help='GPU to use [default: GPU 0]')
 parser.add_argument('--num_point', type=int, default=1024, help='Point Number [default: 1024]')
-parser.add_argument('--model', default='frustum_pointnets_v1', help='Model name [default: frustum_pointnets_v1]')
-parser.add_argument('--model_path', default='log/model.ckpt',
+parser.add_argument('--model', default='frustum_pointnets_gcnn', help='Model name [default: frustum_pointnets_v1]')
+parser.add_argument('--model_path', default='/data1/jiang/frustum-pointnets/train/log_gcnn/model.ckpt',
                     help='model checkpoint file path [default: log/model.ckpt]')
 parser.add_argument('--batch_size', type=int, default=32, help='batch size for inference [default: 32]')
 parser.add_argument('--output', default='test_results', help='output file/folder name [default: test_results]')
@@ -35,7 +35,8 @@ parser.add_argument('--data_path', default=None, help='frustum dataset pickle fi
 parser.add_argument('--from_rgb_detection', action='store_true', help='test from dataset files from rgb detection.')
 parser.add_argument('--idx_path', default=None,
                     help='filename of txt where each line is a data idx, used for rgb detection -- write <id>.txt for all frames. [default: None]')
-parser.add_argument('--dump_result', action='store_true', help='If true, also dump results to .pickle file')
+parser.add_argument('--dump_result', type=bool, default=True, help='If true, also dump results to .pickle file')
+parser.add_argument('--is_hypotheses', type=bool, default=False, help='whether this file is from tracking output')
 FLAGS = parser.parse_args()
 
 # Set training configurations
@@ -50,7 +51,8 @@ NUM_CHANNEL = 4
 # Load Frustum Datasets.
 TEST_DATASET = provider.FrustumDataset(npoints=NUM_POINT, split='val',
                                        rotate_to_center=True, overwritten_data_path=FLAGS.data_path,
-                                       from_rgb_detection=FLAGS.from_rgb_detection, one_hot=True)
+                                       from_rgb_detection=FLAGS.from_rgb_detection, one_hot=True,
+                                       is_hypotheses=FLAGS.is_hypotheses,)
 
 
 def get_session_and_ops(batch_size, num_point):
@@ -162,10 +164,11 @@ def inference(sess, ops, pc, one_hot_vec, batch_size):
 def write_detection_results(result_dir, id_list, type_list, box2d_list, center_list, \
                             heading_cls_list, heading_res_list, \
                             size_cls_list, size_res_list, \
-                            rot_angle_list, score_list):
+                            rot_angle_list, score_list, hypotheses_list=list()):
     ''' Write frustum pointnets results to KITTI format label files. '''
     if result_dir is None: return
     results = {}  # map from idx to list of strings, each string is a line (without \n)
+    is_hypotheses = True if hypotheses_list else False
     for i in range(len(center_list)):
         idx = id_list[i]
         output_str = type_list[i] + " -1 -1 -10 "
@@ -177,6 +180,9 @@ def write_detection_results(result_dir, id_list, type_list, box2d_list, center_l
                                                                            rot_angle_list[i])
         score = score_list[i]
         output_str += "%f %f %f %f %f %f %f %f" % (h, w, l, tx, ty, tz, ry, score)
+        if is_hypotheses:
+            output_str += " %d" %hypotheses_list[i]
+
         if idx not in results: results[idx] = []
         results[idx].append(output_str)
 
@@ -185,7 +191,8 @@ def write_detection_results(result_dir, id_list, type_list, box2d_list, center_l
     output_dir = os.path.join(result_dir, 'data')
     if not os.path.exists(output_dir): os.mkdir(output_dir)
     for idx in results:
-        pred_filename = os.path.join(output_dir, '%06d.txt' % (idx))
+        # pred_filename = os.path.join(output_dir, '%06d.txt' % (idx)) # for detection
+        pred_filename = os.path.join(output_dir, '%010d.txt' % (idx)) # for raw kitti sequence
         fout = open(pred_filename, 'w')
         for line in results[idx]:
             fout.write(line + '\n')
@@ -360,9 +367,131 @@ def test(output_filename, result_dir=None):
                             heading_cls_list, heading_res_list,
                             size_cls_list, size_res_list, rot_angle_list, score_list)
 
+def test_from_video_detection(dataset, output_filename, result_dir=None, sequence_dir=None):
+    ''' Test frustum pointents with 2D boxes from a RGB detector.
+	Write test results to KITTI format label files.
+	todo (rqi): support variable number of points.
+	'''
+    ps_list = []
+    segp_list = []
+    center_list = []
+    heading_cls_list = []
+    heading_res_list = []
+    size_cls_list = []
+    size_res_list = []
+    rot_angle_list = []
+    score_list = []
+    onehot_list = []
+    hypotheses_list = []
+    is_hypotheses = dataset.is_hypotheses
+
+    test_idxs = np.arange(0, len(dataset))
+    print(len(dataset))
+    batch_size = BATCH_SIZE
+    num_batches = int((len(dataset) + batch_size - 1) / batch_size)
+
+    batch_data_to_feed = np.zeros((batch_size, NUM_POINT, NUM_CHANNEL))
+    batch_one_hot_to_feed = np.zeros((batch_size, 3))
+    sess, ops = get_session_and_ops(batch_size=batch_size, num_point=NUM_POINT)
+    for batch_idx in range(num_batches):
+        print('batch idx: %d' % (batch_idx))
+        start_idx = batch_idx * batch_size
+        end_idx = min(len(dataset), (batch_idx + 1) * batch_size)
+        cur_batch_size = end_idx - start_idx
+
+        cur_batch = get_batch(dataset, test_idxs, start_idx, end_idx,
+                      NUM_POINT, NUM_CHANNEL, from_rgb_detection=True)
+        batch_data, batch_rot_angle, batch_rgb_prob = cur_batch[:3]
+        cur_batch = cur_batch[3:]
+        if dataset.one_hot:
+            batch_one_hot_vec = cur_batch.pop(0)
+
+        if dataset.is_hypotheses:
+            batch_hypotheses = cur_batch.pop(0)
+
+        batch_data_to_feed[0:cur_batch_size, ...] = batch_data
+        batch_one_hot_to_feed[0:cur_batch_size, :] = batch_one_hot_vec
+
+        # Run one batch inference
+        batch_output, batch_center_pred, \
+        batch_hclass_pred, batch_hres_pred, \
+        batch_sclass_pred, batch_sres_pred, batch_scores = \
+            inference(sess, ops, batch_data_to_feed,
+                      batch_one_hot_to_feed, batch_size=batch_size)
+
+        for i in range(cur_batch_size):
+            ps_list.append(batch_data[i, ...])
+            segp_list.append(batch_output[i, ...])
+            center_list.append(batch_center_pred[i, :])
+            heading_cls_list.append(batch_hclass_pred[i])
+            heading_res_list.append(batch_hres_pred[i])
+            size_cls_list.append(batch_sclass_pred[i])
+            size_res_list.append(batch_sres_pred[i, :])
+            rot_angle_list.append(batch_rot_angle[i])
+            # score_list.append(batch_scores[i])
+            score_list.append(batch_rgb_prob[i])  # 2D RGB detection score
+            onehot_list.append(batch_one_hot_vec[i])
+            if is_hypotheses:
+                hypotheses_list.append(batch_hypotheses[i])
+
+    if FLAGS.dump_result:
+        with open(output_filename, 'wb') as fp:
+            pickle.dump(ps_list, fp)
+            pickle.dump(segp_list, fp)
+            pickle.dump(center_list, fp)
+            pickle.dump(heading_cls_list, fp)
+            pickle.dump(heading_res_list, fp)
+            pickle.dump(size_cls_list, fp)
+            pickle.dump(size_res_list, fp)
+            pickle.dump(rot_angle_list, fp)
+            pickle.dump(score_list, fp)
+            pickle.dump(onehot_list, fp)
+            if is_hypotheses:
+                pickle.dump(hypotheses_list, fp)
+
+    # Write detection results for KITTI evaluation
+    print('Number of point clouds: %d' % (len(ps_list)))
+    write_detection_results(result_dir, dataset.id_list,
+                            dataset.type_list, dataset.box2d_list,
+                            center_list, heading_cls_list, heading_res_list,
+                            size_cls_list, size_res_list, rot_angle_list, score_list, hypotheses_list)
+    # Make sure for each frame (no matter if we have measurment for that frame),
+    # there is a TXT file
+    output_dir = os.path.join(result_dir, 'data')
+    if sequence_dir is not None:
+        image_dir = os.path.join(sequence_dir, "image_03/data")
+        to_fill_filename_list = [os.path.splitext(f)[0] + '.txt' \
+                                 for f in os.listdir(image_dir)]
+        fill_files(output_dir, to_fill_filename_list)
+
+def generate_test(kitti_dir, is_hypotheses=True):
+
+    for sequence in os.listdir(kitti_dir):
+        # sequence = '2011_09_28_drive_0039_sync'
+        print("Processing %s" % sequence)
+        sequence_dir = os.path.join(kitti_dir, sequence)
+        detection_dir = os.path.join(sequence_dir, 'det')
+        if not os.path.isdir(sequence_dir):
+            continue
+        if is_hypotheses:
+            det_file = os.path.join(detection_dir, sequence + '_video_rgb_hypotheses.pickle')
+            output_file = os.path.join(detection_dir, sequence + '_video_rgb_hypotheses_3D.pickle')
+            result_dir = os.path.join(detection_dir, 'hypotheses_3D')
+        else:
+            det_file = os.path.join(detection_dir, sequence + '_video_rgb_detection.pickle')
+            output_file = os.path.join(detection_dir, sequence + '_video_rgb_detection_3D.pickle')
+            result_dir = os.path.join(detection_dir, 'detection_3D')
+
+
+        test_dataset = provider.FrustumDataset(npoints=NUM_POINT, split='val',
+                                       rotate_to_center=True, overwritten_data_path=det_file,
+                                       from_rgb_detection=True, one_hot=True,
+                                       is_hypotheses=is_hypotheses,)
+        test_from_video_detection(test_dataset, output_file, result_dir, sequence_dir)
 
 if __name__ == '__main__':
-    if FLAGS.from_rgb_detection:
-        test_from_rgb_detection(FLAGS.output + '.pickle', FLAGS.output)
-    else:
-        test(FLAGS.output + '.pickle', FLAGS.output)
+    # if FLAGS.from_rgb_detection:
+    #     test_from_rgb_detection(FLAGS.output + '.pickle', FLAGS.output)
+    # else:
+    #     test(FLAGS.output + '.pickle', FLAGS.output)
+    generate_test('/data1/KITTI/2011_09_28')

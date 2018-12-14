@@ -126,7 +126,7 @@ def draw_gt_boxes3d(gt_boxes3d, fig, color=(1,1,1), line_width=1, draw_text=True
 
 
 if __name__=='__main__':
-    pc = np.loadtxt('mayavi/kitti_sample_scan.txt')
+    pc = np.loadtxt('../mayavi/kitti_sample_scan.txt')
     fig = draw_lidar(pc)
     mlab.savefig('pc_view.jpg', figure=fig)
     raw_input()

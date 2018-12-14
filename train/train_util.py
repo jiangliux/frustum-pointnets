@@ -38,14 +38,23 @@ def get_batch(dataset, idxs, start_idx, end_idx,
     batch_rot_angle = np.zeros((bsize,))
     if dataset.one_hot:
         batch_one_hot_vec = np.zeros((bsize,3)) # for car,ped,cyc
+    if dataset.is_hypotheses:
+        batch_hypotheses = np.zeros((bsize,), dtype=np.int32) # for tracking id
+
     for i in range(bsize):
+        cur_list = dataset[idxs[i+start_idx]]
+        ps, seg, center, hclass, hres, sclass, sres, rotangle = cur_list[:8]
+        cur_list = cur_list[8:]
+
         if dataset.one_hot:
-            ps,seg,center,hclass,hres,sclass,sres,rotangle,onehotvec = \
-                dataset[idxs[i+start_idx]]
+            onehotvec = cur_list.pop(0)
             batch_one_hot_vec[i] = onehotvec
-        else:
-            ps,seg,center,hclass,hres,sclass,sres,rotangle = \
-                dataset[idxs[i+start_idx]]
+
+        if dataset.is_hypotheses:
+            hypotheses = cur_list.pop(0)
+            batch_hypotheses[i] = hypotheses
+
+
         batch_data[i,...] = ps[:,0:num_channel]
         batch_label[i,:] = seg
         batch_center[i,:] = center
@@ -54,15 +63,17 @@ def get_batch(dataset, idxs, start_idx, end_idx,
         batch_size_class[i] = sclass
         batch_size_residual[i] = sres
         batch_rot_angle[i] = rotangle
+
+    return_list = [batch_data, batch_label, batch_center,
+                   batch_heading_class, batch_heading_residual,
+                   batch_size_class, batch_size_residual,
+                   batch_rot_angle]
+
     if dataset.one_hot:
-        return batch_data, batch_label, batch_center, \
-            batch_heading_class, batch_heading_residual, \
-            batch_size_class, batch_size_residual, \
-            batch_rot_angle, batch_one_hot_vec
-    else:
-        return batch_data, batch_label, batch_center, \
-            batch_heading_class, batch_heading_residual, \
-            batch_size_class, batch_size_residual, batch_rot_angle
+        return_list.append(batch_one_hot_vec)
+    if dataset.is_hypotheses:
+        return_list.append(batch_hypotheses)
+    return return_list
 
 def get_batch_from_rgb_detection(dataset, idxs, start_idx, end_idx,
                                  num_point, num_channel):
@@ -72,18 +83,32 @@ def get_batch_from_rgb_detection(dataset, idxs, start_idx, end_idx,
     batch_prob = np.zeros((bsize,))
     if dataset.one_hot:
         batch_one_hot_vec = np.zeros((bsize,3)) # for car,ped,cyc
+    if dataset.is_hypotheses:
+        batch_hypotheses = np.zeros((bsize,), dtype=np.int32) # for tracking id
+
     for i in range(bsize):
+        cur_list = dataset[idxs[i+start_idx]]
+        ps, rotangle, prob = cur_list[:3]
+        cur_list = cur_list[3:]
+
         if dataset.one_hot:
-            ps,rotangle,prob,onehotvec = dataset[idxs[i+start_idx]]
+            onehotvec = cur_list.pop(0)
             batch_one_hot_vec[i] = onehotvec
-        else:
-            ps,rotangle,prob = dataset[idxs[i+start_idx]]
+
+        if dataset.is_hypotheses:
+            hypotheses = cur_list.pop(0)
+            batch_hypotheses[i] = hypotheses
+
         batch_data[i,...] = ps[:,0:num_channel]
         batch_rot_angle[i] = rotangle
         batch_prob[i] = prob
-    if dataset.one_hot:
-        return batch_data, batch_rot_angle, batch_prob, batch_one_hot_vec
-    else:
-        return batch_data, batch_rot_angle, batch_prob
 
+    return_list = [batch_data, batch_rot_angle, batch_prob]
+    if dataset.one_hot:
+        return_list.append(batch_one_hot_vec)
+
+    if dataset.is_hypotheses:
+        return_list.append(batch_hypotheses)
+
+    return return_list
 

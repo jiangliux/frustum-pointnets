@@ -11,7 +11,7 @@ import os
 
 class Object3d(object):
     ''' 3d object label '''
-    def __init__(self, label_file_line):
+    def __init__(self, label_file_line, from_detection=False, from_tracking=False):
         data = label_file_line.split(' ')
         data[1:] = [float(x) for x in data[1:]]
 
@@ -34,6 +34,14 @@ class Object3d(object):
         self.l = data[10] # box length (in meters)
         self.t = (data[11],data[12],data[13]) # location (x,y,z) in camera coord.
         self.ry = data[14] # yaw angle (around Y-axis in camera coordinates) [-pi..pi]
+        self.from_detection = from_detection
+        self.from_tracking = from_tracking
+
+        if from_detection:
+            self.score = data[15]
+
+        if from_tracking:
+            self.track = data[16]
 
     def print_object(self):
         print('Type, truncation, occlusion, alpha: %s, %d, %d, %f' % \
@@ -44,6 +52,10 @@ class Object3d(object):
             (self.h, self.w, self.l))
         print('3d bbox location, ry: (%f, %f, %f), %f' % \
             (self.t[0],self.t[1],self.t[2],self.ry))
+        if self.from_detection:
+            print('detection score: %.2f' % self.score)
+        if self.from_tracking:
+            print('track id: %d' % self.track)
 
 
 class Calibration(object):
@@ -288,7 +300,7 @@ def project_to_image(pts_3d, P):
     '''
     n = pts_3d.shape[0]
     pts_3d_extend = np.hstack((pts_3d, np.ones((n,1))))
-    print(('pts_3d_extend shape: ', pts_3d_extend.shape))
+    # print(('pts_3d_extend shape: ', pts_3d_extend.shape))
     pts_2d = np.dot(pts_3d_extend, np.transpose(P)) # nx3
     pts_2d[:,0] /= pts_2d[:,2]
     pts_2d[:,1] /= pts_2d[:,2]

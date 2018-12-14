@@ -10,6 +10,8 @@ import sys
 import numpy as np
 import cv2
 from PIL import Image
+import colorsys
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(os.path.join(ROOT_DIR, 'mayavi'))
@@ -20,7 +22,53 @@ try:
 except NameError:
     raw_input = input  # Python 3
 
+def create_unique_color_float(tag, hue_step=0.41):
+    """Create a unique RGB color code for a given track id (tag).
 
+    The color code is generated in HSV color space by moving along the
+    hue angle and gradually changing the saturation.
+
+    Parameters
+    ----------
+    tag : int
+        The unique target identifying tag.
+    hue_step : float
+        Difference between two neighboring color codes in HSV space (more
+        specifically, the distance in hue channel).
+
+    Returns
+    -------
+    (float, float, float)
+        RGB color code in range [0, 1]
+
+    """
+    h, v = (tag * hue_step) % 1, 1. - (int(tag * hue_step) % 4) / 5.
+    r, g, b = colorsys.hsv_to_rgb(h, 1., v)
+    return r, g, b
+
+
+def create_unique_color_uchar(tag, hue_step=0.41):
+    """Create a unique RGB color code for a given track id (tag).
+
+    The color code is generated in HSV color space by moving along the
+    hue angle and gradually changing the saturation.
+
+    Parameters
+    ----------
+    tag : int
+        The unique target identifying tag.
+    hue_step : float
+        Difference between two neighboring color codes in HSV space (more
+        specifically, the distance in hue channel).
+
+    Returns
+    -------
+    (int, int, int)
+        RGB color code in range [0, 255]
+
+    """
+    r, g, b = create_unique_color_float(tag, hue_step)
+    return int(255*r), int(255*g), int(255*b)
 class kitti_object(object):
     '''Load and parse object data into a usable format.'''
     
@@ -78,25 +126,28 @@ class kitti_object_video(object):
         self.calib = utils.Calibration(calib_dir, from_video=True)
         self.img_dir = img_dir
         self.lidar_dir = lidar_dir
-        self.img_filenames = sorted([os.path.join(img_dir, filename) \
-            for filename in os.listdir(img_dir)])
-        self.lidar_filenames = sorted([os.path.join(lidar_dir, filename) \
-            for filename in os.listdir(lidar_dir)])
-        print(len(self.img_filenames))
-        print(len(self.lidar_filenames))
-        #assert(len(self.img_filenames) == len(self.lidar_filenames))
+        self.img_filenames = {
+            int(os.path.splitext(f)[0]):
+                os.path.join(img_dir, f) for f in os.listdir(img_dir)
+        }
+        self.lidar_filenames = {
+            int(os.path.splitext(f)[0]):
+                os.path.join(lidar_dir, f) for f in os.listdir(lidar_dir)
+        }
+
+        assert(len(self.img_filenames) == len(self.lidar_filenames))
         self.num_samples = len(self.img_filenames)
 
     def __len__(self):
         return self.num_samples
 
     def get_image(self, idx):
-        assert(idx<self.num_samples) 
+        assert(idx in self.img_filenames)
         img_filename = self.img_filenames[idx]
         return utils.load_image(img_filename)
 
     def get_lidar(self, idx): 
-        assert(idx<self.num_samples) 
+        assert(idx in self.lidar_filenames)
         lidar_filename = self.lidar_filenames[idx]
         return utils.load_velo_scan(lidar_filename)
 
@@ -134,6 +185,103 @@ def show_image_with_boxes(img, objects, calib, show3d=True):
     Image.fromarray(img1).show()
     if show3d:
         Image.fromarray(img2).show()
+
+
+color_map = {
+    # 'Car': (255, 0, 0),
+    'Pedestrian': (0, 255, 0),
+    # 'Cyclist': (0, 0, 255),
+}
+
+def run_on_opencv_image(img, objects, calib):
+    img1 = np.copy(img) # for 2d bbox
+    img2 = np.copy(img) # for 3d bbox
+    for obj in objects:
+        if obj.type not in color_map:continue
+        cv2.rectangle(img1, (int(obj.xmin),int(obj.ymin)),
+            (int(obj.xmax),int(obj.ymax)), color_map[obj.type], 2)
+        box3d_pts_2d, box3d_pts_3d = utils.compute_box_3d(obj, calib.P)
+        if box3d_pts_2d is None:continue
+        img2 = utils.draw_projected_box3d(img2, box3d_pts_2d, color_map[obj.type], thickness=2)
+    # img2 = overlay_class_names(img2, objects, calib)
+    return img1, img2
+
+def rectangle(image, xmin, ymin, xmax, ymax, color, thickness=2, label=None):
+    """Draw a rectangle.
+
+    Parameters
+    ----------
+    x : float | int
+        Top left corner of the rectangle (x-axis).
+    y : float | int
+        Top let corner of the rectangle (y-axis).
+    w : float | int
+        Width of the rectangle.
+    h : float | int
+        Height of the rectangle.
+    label : Optional[str]
+        A text label that is placed at the top left corner of the
+        rectangle.
+
+    """
+    pt1 = int(xmin), int(ymin)
+    pt2 = int(xmax), int(ymax)
+    cv2.rectangle(image, pt1, pt2, color, thickness)
+    if label is not None:
+        put_track_id(image, pt1[0], pt1[1], label, color, thickness)
+        # text_size = cv2.getTextSize(
+        #     label, cv2.FONT_HERSHEY_PLAIN, 1, thickness)
+        #
+        # center = pt1[0] + 5, pt1[1] + 5 + text_size[0][1]
+        # pt2 = pt1[0] + 10 + text_size[0][0], pt1[1] + 10 + \
+        #     text_size[0][1]
+        # cv2.rectangle(image, pt1, pt2, color, -1)
+        # cv2.putText(image, label, center, cv2.FONT_HERSHEY_PLAIN,
+        #             1, (255, 255, 255), thickness)
+
+def put_track_id(image, x, y, label, color, thickness=2):
+    text_size = cv2.getTextSize(
+        label, cv2.FONT_HERSHEY_PLAIN, 1, thickness)
+    pt1 = int(x), int(y)
+    center = pt1[0] + 5, pt1[1] + 5 + text_size[0][1]
+    pt2 = pt1[0] + 10 + text_size[0][0], pt1[1] + 10 + \
+          text_size[0][1]
+    cv2.rectangle(image, pt1, pt2, color, -1)
+    cv2.putText(image, label, center, cv2.FONT_HERSHEY_PLAIN,
+                1, (255, 255, 255), thickness)
+
+
+def run_on_tracking_image(img, objects, calib):
+    img1 = np.copy(img)  # for 2d bbox
+    img2 = np.copy(img)  # for 3d bbox
+    for obj in objects:
+        track_id = int(obj.track)
+        color = create_unique_color_uchar(track_id)
+        rectangle(img1, obj.xmin, obj.ymin, obj.xmax, obj.ymax, color, label=str(track_id))
+
+        box3d_pts_2d, box3d_pts_3d = utils.compute_box_3d(obj, calib.P)
+        if box3d_pts_2d is None: continue
+        img2 = utils.draw_projected_box3d(img2, box3d_pts_2d, color, thickness=2)
+        left_top = np.amin(box3d_pts_2d, axis=0)
+        put_track_id(img2, left_top[0], left_top[1], str(track_id), color, thickness=2)
+
+    # img2 = overlay_class_names(img2, objects, calib)
+    return img1, img2
+
+
+def overlay_class_names(img, objects, calib):
+    template = "{}: {:.2f}"
+
+    for obj in objects:
+        if obj.type=='DontCare':continue
+        box3d_pts_2d, box3d_pts_3d = utils.compute_box_3d(obj, calib.P)
+        x, y = box3d_pts_2d[5,0], box3d_pts_2d[5,1]
+        s = template.format(obj.type, obj.score)
+        cv2.putText(
+            img, s, (int(x), int(y - 5)), cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 255, 255), 1
+        )
+
+    return img
 
 def get_lidar_in_image_fov(pc_velo, calib, xmin, ymin, xmax, ymax,
                            return_more=False, clip_distance=2.0):
